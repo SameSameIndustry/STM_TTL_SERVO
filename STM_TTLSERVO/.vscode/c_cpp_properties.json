@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "STM32G4",
+            "includePath": [
+                "${workspaceFolder}/STM_core/Core/Inc",
+                "${workspaceFolder}/STM_core/Drivers/STM32G4xx_HAL_Driver/Inc",
+                "${workspaceFolder}/STM_core/Drivers/STM32G4xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/STM_core/Drivers/CMSIS/Device/ST/STM32G4xx/Include",
+                "${workspaceFolder}/STM_core/Drivers/CMSIS/Include"
+            ],
+            "defines": [
+                "USE_HAL_DRIVER",
+                "STM32G431xx"
+            ],
+            "compilerPath": "",
+            "cStandard": "c11",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "gcc-arm"
+        }
+    ],
+    "version": 4
+}

@@ -1,0 +1,47 @@
+# ===== Build outputs =====
+build/
+STM_core/build/
+*.elf
+*.bin
+*.hex
+*.map
+*.o
+*.a
+*.d
+*.su
+
+# ===== CMake =====
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.cmake/
+
+# ===== IAR EWARM build outputs =====
+STM_core/EWARM/Debug/
+STM_core/EWARM/Release/
+STM_core/EWARM/settings/
+*.dep
+*.xcl
+
+# ===== KiCad =====
+*-backups/
+*.kicad_prl
+fp-info-cache
+*.bak
+*.000
+
+# ===== VS Code (machine-specific paths) =====
+# settings.json  : contains absolute OpenOCD path
+# c_cpp_properties.json : contains absolute compiler path
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+STM_core/.vscode/
+
+# ===== Windows =====
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ===== macOS =====
+.DS_Store
