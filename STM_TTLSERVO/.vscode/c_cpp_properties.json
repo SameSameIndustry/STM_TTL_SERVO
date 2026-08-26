@@ -3,11 +3,11 @@
         {
             "name": "STM32G4",
             "includePath": [
-                "${workspaceFolder}/STM_core/Core/Inc",
-                "${workspaceFolder}/STM_core/Drivers/STM32G4xx_HAL_Driver/Inc",
-                "${workspaceFolder}/STM_core/Drivers/STM32G4xx_HAL_Driver/Inc/Legacy",
-                "${workspaceFolder}/STM_core/Drivers/CMSIS/Device/ST/STM32G4xx/Include",
-                "${workspaceFolder}/STM_core/Drivers/CMSIS/Include"
+                "${workspaceFolder}/Core/Inc",
+                "${workspaceFolder}/Drivers/STM32G4xx_HAL_Driver/Inc",
+                "${workspaceFolder}/Drivers/STM32G4xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/Drivers/CMSIS/Device/ST/STM32G4xx/Include",
+                "${workspaceFolder}/Drivers/CMSIS/Include"
             ],
             "defines": [
                 "USE_HAL_DRIVER",

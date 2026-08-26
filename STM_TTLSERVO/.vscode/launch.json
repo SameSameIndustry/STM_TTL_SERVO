@@ -6,7 +6,7 @@
       "type": "cortex-debug",
       "request": "launch",
       "servertype": "openocd",
-      "executable": "${workspaceFolder}/STM_core/build/Debug/STM_core.elf",
+      "executable": "${workspaceFolder}/build/Debug/STM_core.elf",
       "configFiles": [
         "interface/stlink.cfg",
         "target/stm32g4x.cfg"

@@ -21,9 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "as5600.h"
-#include "bldc.h"
-#include <math.h>
+#include "feetech_sts.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,14 +31,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* 5° in AS5600 raw counts: 5 / 360 * 4096 ≈ 57 */
-#define AS5600_ZONE_MARGIN  57u
-
-/* Target position: 90° mechanical from the position read at power-on. */
-#define TARGET_OFFSET_COUNTS   (BLDC_ENCODER_COUNTS / 4u)   /* 1024 = 90° */
-
-/* "On target" tolerance for the status LED (reuses the 5° margin above). */
-#define POS_TOLERANCE_COUNTS   AS5600_ZONE_MARGIN
+#define SERVO_ID             1u
+/* STS3215 position range is 0-4095 over one mechanical turn (~0.088 deg/count). */
+#define SERVO_CENTER_POS     2048u
+#define SERVO_SWING_POS_COUNTS  ((uint16_t)(50u * 4096u / 360u)) /* +45 deg */
+#define SERVO_SWING_NEG_COUNTS  ((uint16_t)(25u * 4096u / 360u)) /* -30 deg */
+#define SERVO_MOVE_TIME_MS   1000u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,9 +47,12 @@
 /* Private variables ---------------------------------------------------------*/
 FDCAN_HandleTypeDef hfdcan1;
 
-I2C_HandleTypeDef hi2c1;
+TIM_HandleTypeDef htim1;
+DMA_HandleTypeDef hdma_tim1_ch1;
 
-TIM_HandleTypeDef htim3;
+UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
+DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
 
@@ -62,9 +61,10 @@ TIM_HandleTypeDef htim3;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_FDCAN1_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_TIM3_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -103,61 +103,21 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_FDCAN1_Init();
-  MX_I2C1_Init();
-  MX_TIM3_Init();
+  MX_TIM1_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  AS5600_Init();
-  BLDC_Init();
-
-  /* Position read before the rotor is driven anywhere: the control target
-   * is defined relative to this power-on position. */
-  uint16_t initial_angle = 0u;
-  AS5600_ReadAngle(&initial_angle);
-
-  /* Settle the rotor at a known starting field angle (0°) before the
-   * velocity-cascade loop begins. Unlike the earlier torque-mode design,
-   * the rotor's electrical phase no longer needs to be tracked afterward —
-   * commutation below is open-loop (a free-running field angle, same
-   * mechanism as BLDC_StartupRamp/BLDC_Run), and only its rotation SPEED is
-   * closed-loop controlled. */
-  BLDC_Commutate(0u, BLDC_ALIGN_DUTY);
-  HAL_Delay(BLDC_ALIGN_TIME_MS);
-  uint16_t settle_angle = 0u;
-  AS5600_ReadAngle(&settle_angle);
-
-  /* Direction calibration: step the commanded electrical angle forward a
-   * bit and measure which way the encoder moves. Without this, advancing
-   * the free-running field "forward" below would only push toward the
-   * target by coincidence — the correspondence between "increasing
-   * electrical angle" and "increasing encoder count" depends on motor
-   * winding / encoder mounting and is not otherwise known. */
-  BLDC_Commutate((uint8_t)BLDC_DIR_CAL_ELEC_STEP, BLDC_ALIGN_DUTY);
-  HAL_Delay(BLDC_ALIGN_TIME_MS);
-  uint16_t dir_cal_angle = 0u;
-  AS5600_ReadAngle(&dir_cal_angle);
-
-  int32_t dir_cal_delta = (int32_t)dir_cal_angle - (int32_t)settle_angle;
-  dir_cal_delta = ((dir_cal_delta + (int32_t)(BLDC_ENCODER_COUNTS / 2u))
-                    & (int32_t)(BLDC_ENCODER_COUNTS - 1u))
-                   - (int32_t)(BLDC_ENCODER_COUNTS / 2u);
-  /* +1 if increasing electrical angle increases the encoder count, -1 if
-   * the motor/encoder are mounted the other way around. */
-  int32_t elec_dir_sign = (dir_cal_delta >= 0) ? 1 : -1;
-
-  uint16_t target_angle = (uint16_t)((initial_angle + TARGET_OFFSET_COUNTS)
-                                      & (BLDC_ENCODER_COUNTS - 1u));
-
-  /* Free-running commanded electrical field angle [°], wrapped to
-   * [0, 360). Starts where the direction-calibration step left it, so the
-   * velocity loop below doesn't begin with a discontinuous jump. Only its
-   * rate of advance is closed-loop controlled (velocity cascade); duty
-   * stays fixed at BLDC_POS_RUN_DUTY throughout. */
-  float field_elec_deg = (float)BLDC_DIR_CAL_ELEC_STEP * (360.0f / 256.0f);
-
-  /* Actual (rate-limited) commanded speed, ramped toward the desired speed
-   * by at most BLDC_POS_MAX_ACCEL_DEG_S2 per second — see loop below. */
-  float commanded_speed_deg_s = 0.0f;
+  STS_Init(&huart1, GPIOA, GPIO_PIN_7);
+  /* Servo was previously switched to PWM mode (EEPROM-persisted) during
+   * testing - explicitly switch back to position mode. */
+  STS_SetMode(SERVO_ID, STS_MODE_POSITION);
+  STS_TorqueEnable(SERVO_ID, 1u);
+  /* Earlier testing left the servo's RAM Torque_Limit at 1% (addr 48);
+   * that persists across MCU resets as long as the servo itself stays
+   * powered, so restore full torque explicitly rather than assuming the
+   * EEPROM default (1000 = 100%) is still in effect. */
+  STS_SetTorqueLimit(SERVO_ID, 1000u);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -167,70 +127,15 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    uint16_t angle;
-    if (AS5600_ReadAngle(&angle) == AS5600_OK) {
-        /* Shortest-path signed error in encoder counts (wraps through 0/4095). */
-        int32_t err = (int32_t)target_angle - (int32_t)angle;
-        err = ((err + (int32_t)(BLDC_ENCODER_COUNTS / 2u))
-               & (int32_t)(BLDC_ENCODER_COUNTS - 1u))
-              - (int32_t)(BLDC_ENCODER_COUNTS / 2u);
-        float error_deg = (float)err * (360.0f / (float)BLDC_ENCODER_COUNTS);
-        uint8_t on_target = (err > -(int32_t)POS_TOLERANCE_COUNTS)
-                          && (err <  (int32_t)POS_TOLERANCE_COUNTS);
+    /* Swing from -45 deg to +30 deg about center; LED D4 (PB3) toggles
+     * each move as an activity indicator. */
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+    STS_WritePosition(SERVO_ID, SERVO_CENTER_POS - SERVO_SWING_NEG_COUNTS, SERVO_MOVE_TIME_MS, 0u);
+    HAL_Delay(1500);
 
-        /* Velocity cascade: position error sets the field's commanded
-         * rotation SPEED, not its duty/torque — duty stays fixed at
-         * BLDC_POS_RUN_DUTY (below). This reuses the same continuously-
-         * advancing open-loop commutation already proven to spin this motor
-         * reliably, instead of scaling duty with error (which was too weak
-         * to break static friction for small errors).
-         *
-         * Trapezoidal profile: the desired speed is the fastest speed that
-         * can still decelerate to exactly 0 at the target using at most
-         * BLDC_POS_MAX_ACCEL_DEG_S2 (from v² = 2·a·d), clamped to
-         * BLDC_POS_MAX_SPEED_DEG_S. Far from the target this saturates at
-         * max speed (cruise); close to the target it naturally traces the
-         * physically-correct braking curve down to 0 instead of an
-         * arbitrary proportional droop — accelerate, cruise, decelerate,
-         * converge, with no overshoot. */
-        float dist_deg = fabsf(error_deg);
-        float desired_speed_mag = sqrtf(2.0f * BLDC_POS_MAX_ACCEL_DEG_S2 * dist_deg);
-        if (desired_speed_mag > BLDC_POS_MAX_SPEED_DEG_S) desired_speed_mag = BLDC_POS_MAX_SPEED_DEG_S;
-        float desired_speed_deg_s = (error_deg >= 0.0f) ? desired_speed_mag : -desired_speed_mag;
-
-        /* Acceleration limit: slew commanded_speed_deg_s toward
-         * desired_speed_deg_s by at most BLDC_POS_MAX_ACCEL_DEG_S2 per
-         * second, instead of jumping straight to it. Without this, a large
-         * position error would instantly command BLDC_POS_MAX_SPEED_DEG_S
-         * from a standstill, risking the rotor losing sync (the same
-         * failure mode seen when testing higher open-loop approach speeds
-         * without a ramp earlier). */
-        float dt_s = (float)BLDC_POS_LOOP_PERIOD_MS / 1000.0f;
-        float max_speed_delta = BLDC_POS_MAX_ACCEL_DEG_S2 * dt_s;
-        float speed_error = desired_speed_deg_s - commanded_speed_deg_s;
-        if (speed_error > max_speed_delta) {
-            commanded_speed_deg_s += max_speed_delta;
-        } else if (speed_error < -max_speed_delta) {
-            commanded_speed_deg_s -= max_speed_delta;
-        } else {
-            commanded_speed_deg_s = desired_speed_deg_s;
-        }
-
-        /* elec_dir_sign corrects for which physical direction "increasing
-         * electrical angle" actually turns this motor (see calibration
-         * above), so commanded_speed_deg_s > 0 always advances the field
-         * toward increasing mechanical angle regardless of winding /
-         * encoder mounting. */
-        field_elec_deg += (float)elec_dir_sign * commanded_speed_deg_s * dt_s * MOTOR_POLE_PAIRS;
-        field_elec_deg = fmodf(field_elec_deg, 360.0f);
-        if (field_elec_deg < 0.0f) field_elec_deg += 360.0f;
-
-        uint8_t comm_angle = (uint8_t)(field_elec_deg * (256.0f / 360.0f));
-        BLDC_Commutate(comm_angle, BLDC_POS_RUN_DUTY);
-
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, on_target ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    }
-    HAL_Delay(BLDC_POS_LOOP_PERIOD_MS);
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+    STS_WritePosition(SERVO_ID, SERVO_CENTER_POS + SERVO_SWING_POS_COUNTS, SERVO_MOVE_TIME_MS, 0u);
+    HAL_Delay(1500);
   }
   /* USER CODE END 3 */
 }
@@ -324,117 +229,145 @@ static void MX_FDCAN1_Init(void)
 }
 
 /**
-  * @brief I2C1 Initialization Function
+  * @brief TIM1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_I2C1_Init(void)
+static void MX_TIM1_Init(void)
 {
 
-  /* USER CODE BEGIN I2C1_Init 0 */
+  /* USER CODE BEGIN TIM1_Init 0 */
 
-  /* USER CODE END I2C1_Init 0 */
+  /* USER CODE END TIM1_Init 0 */
 
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x60E12C36;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief TIM3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM3_Init(void)
-{
-
-  /* USER CODE BEGIN TIM3_Init 0 */
-
-  /* USER CODE END TIM3_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
-  /* USER CODE BEGIN TIM3_Init 1 */
+  /* USER CODE BEGIN TIM1_Init 1 */
 
-  /* USER CODE END TIM3_Init 1 */
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 3999;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 0;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 99;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.BreakFilter = 0;
+  sBreakDeadTimeConfig.BreakAFMode = TIM_BREAK_AFMODE_INPUT;
+  sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
+  sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
+  sBreakDeadTimeConfig.Break2Filter = 0;
+  sBreakDeadTimeConfig.Break2AFMode = TIM_BREAK_AFMODE_INPUT;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM3_Init 2 */
+  /* USER CODE BEGIN TIM1_Init 2 */
 
-  /* USER CODE END TIM3_Init 2 */
-  HAL_TIM_MspPostInit(&htim3);
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 1000000;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMAMUX1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -456,13 +389,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_3, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PA0 PA1 PA2 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2;
+  /*Configure GPIO pin : PA7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
