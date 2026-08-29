@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "feetech_sts.h"
+#include "can_protocol.h"
+#include "ws2812.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,11 +34,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define SERVO_ID             1u
-/* STS3215 position range is 0-4095 over one mechanical turn (~0.088 deg/count). */
-#define SERVO_CENTER_POS     2048u
-#define SERVO_SWING_POS_COUNTS  ((uint16_t)(50u * 4096u / 360u)) /* +45 deg */
-#define SERVO_SWING_NEG_COUNTS  ((uint16_t)(25u * 4096u / 360u)) /* -30 deg */
-#define SERVO_MOVE_TIME_MS   1000u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -108,6 +105,7 @@ int main(void)
   MX_TIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  WS2812_Init();
   STS_Init(&huart1, GPIOA, GPIO_PIN_7);
   /* Servo was previously switched to PWM mode (EEPROM-persisted) during
    * testing - explicitly switch back to position mode. */
@@ -118,24 +116,31 @@ int main(void)
    * powered, so restore full torque explicitly rather than assuming the
    * EEPROM default (1000 = 100%) is still in effect. */
   STS_SetTorqueLimit(SERVO_ID, 1000u);
+
+  /* Sets up the RX filter/IRQ for CAN_NODE_ID and starts FDCAN1. Must come
+   * after the STS_* calls above so it can read the servo's present
+   * position to seed the OPEN/CLOSE-relative target. */
+  CAN_Init(&hfdcan1, SERVO_ID);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  uint32_t last_blink_tick = HAL_GetTick();
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Swing from -45 deg to +30 deg about center; LED D4 (PB3) toggles
-     * each move as an activity indicator. */
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
-    STS_WritePosition(SERVO_ID, SERVO_CENTER_POS - SERVO_SWING_NEG_COUNTS, SERVO_MOVE_TIME_MS, 0u);
-    HAL_Delay(1500);
+    /* Drains commands queued by the FDCAN ISR and drives the servo over
+     * USART1 - never blocks on CAN traffic, so this runs every iteration. */
+    CAN_Process();
 
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
-    STS_WritePosition(SERVO_ID, SERVO_CENTER_POS + SERVO_SWING_POS_COUNTS, SERVO_MOVE_TIME_MS, 0u);
-    HAL_Delay(1500);
+    /* Non-blocking heartbeat (LED D4 / PB3) - HAL_Delay would stall
+     * CAN_Process() above, so poll the tick count instead. */
+    if ((HAL_GetTick() - last_blink_tick) >= 500u) {
+        HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_3);
+        last_blink_tick = HAL_GetTick();
+    }
   }
   /* USER CODE END 3 */
 }
@@ -215,7 +220,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
   hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.StdFiltersNbr = 0;
+  hfdcan1.Init.StdFiltersNbr = 1;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
