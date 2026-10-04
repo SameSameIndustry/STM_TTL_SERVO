@@ -34,9 +34,11 @@ AS5600 磁気エンコーダによるクローズドループ PD 位置制御と
 ### 前提
 
 - CMake Tools 拡張機能、cortex-debug 拡張機能をインストール済みであること
-- ARM GNU Toolchain（`arm-none-eabi-gcc`）がインストールされていること
-- OpenOCD（xPack 版）がインストールされ、パスが `.vscode/settings.json` の `cortex-debug.openocdPath` と一致していること（別環境の場合はここを調整）
+- ARM GNU Toolchain（`arm-none-eabi-gcc`）、CMake、Ninja、OpenOCD（xPack 版など）がインストールされ、
+  いずれも `PATH` 環境変数に通っていること（`tasks.json` は `openocd` / `arm-none-eabi-gcc` をコマンド名のみで呼び出す）
 - ST-Link がボードに USB 接続されていること
+- （任意）cortex-debug のデバッグ実行で OpenOCD の実行ファイルを明示したい場合は、
+  `.vscode/settings.json`（gitignore 対象・各自のローカル環境専用）に `cortex-debug.openocdPath` を設定する
 
 ### ビルド
 

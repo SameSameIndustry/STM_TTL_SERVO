@@ -30,12 +30,16 @@ STM_core/EWARM/settings/
 fp-info-cache
 *.bak
 *.000
+# Netlist is regenerated from the .kicad_sch and embeds the absolute
+# source path (includes the local username) each time it's exported.
+*.net
 
 # ===== VS Code (machine-specific paths) =====
 # settings.json  : contains absolute OpenOCD path
 # c_cpp_properties.json : contains absolute compiler path
-.vscode/settings.json
-.vscode/c_cpp_properties.json
+# Patterns use **/ so this also covers nested project dirs (e.g. STM_TTLSERVO/.vscode/)
+**/.vscode/settings.json
+**/.vscode/c_cpp_properties.json
 STM_core/.vscode/
 
 # ===== Windows =====
